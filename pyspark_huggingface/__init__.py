@@ -1,1 +1,1 @@
-from pyspark_huggingface.huggingface import HuggingFaceDatasets
+from pyspark_huggingface.huggingface import HuggingFaceDatasets as DefaultSource

@@ -1,8 +1,7 @@
 from pyspark.sql.datasource import DataSource, DataSourceReader
-from pyspark.sql.types import StructField, StructType, StringType
+from pyspark.sql.pandas.types import from_arrow_schema
+from pyspark.sql.types import StructType
 
-
-# TODO: Use `DefaultSource`
 class HuggingFaceDatasets(DataSource):
     """
     A DataSource for reading and writing HuggingFace Datasets in Spark.
@@ -24,7 +23,10 @@ class HuggingFaceDatasets(DataSource):
 
     Load a public dataset from the HuggingFace Hub.
 
-    >>> spark.read.format("huggingface").load("imdb").show()
+    >>> df = spark.read.format("huggingface").load("imdb")
+    DataFrame[text: string, label: bigint]
+
+    >>> df.show()
     +--------------------+-----+
     |                text|label|
     +--------------------+-----+
@@ -48,7 +50,7 @@ class HuggingFaceDatasets(DataSource):
     def __init__(self, options):
         super().__init__(options)
         if "path" not in options or not options["path"]:
-            raise Exception("You must specify a dataset name in`.load()`.")
+            raise Exception("You must specify a dataset name.")
 
     @classmethod
     def name(cls):
@@ -64,27 +66,30 @@ class HuggingFaceDatasets(DataSource):
                 "Unable to automatically determine the schema using the dataset features. "
                 "Please specify the schema manually using `.schema()`."
             )
-        schema = StructType()
-        for key, value in features.items():
-            # For simplicity, use string for all values.
-            schema.add(StructField(key, StringType(), True))
-        return schema
+        return from_arrow_schema(features.arrow_schema)
 
     def reader(self, schema: StructType) -> "DataSourceReader":
         return HuggingFaceDatasetsReader(schema, self.options)
 
 
 class HuggingFaceDatasetsReader(DataSourceReader):
+    DEFAULT_SPLIT: str = "train"
+
     def __init__(self, schema: StructType, options: dict):
         self.schema = schema
         self.dataset_name = options["path"]
-        # TODO: validate the split value.
-        self.split = options.get("split", "train")  # Default using train split.
+        # Get and validate the split name
+        self.split = options.get("split", self.DEFAULT_SPLIT)
+        from datasets import get_dataset_split_names
+        valid_splits = get_dataset_split_names(self.dataset_name)
+        if self.split not in valid_splits:
+            raise Exception(f"Split {self.split} is invalid. Valid options are {valid_splits}")
 
     def read(self, partition):
         from datasets import load_dataset
         columns = [field.name for field in self.schema.fields]
+        # TODO: add config
         iter_dataset = load_dataset(self.dataset_name, split=self.split, streaming=True)
-        for example in iter_dataset:
+        for data in iter_dataset:
             # TODO: next spark 4.0.0 dev release will include the feature to yield as an iterator of pa.RecordBatch
-            yield tuple([example.get(column) for column in columns])
+            yield tuple([data.get(column) for column in columns])
