@@ -1,4 +1,5 @@
 import ast
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, List, Optional
 
@@ -13,6 +14,8 @@ if TYPE_CHECKING:
     from huggingface_hub import CommitOperationAdd
     from pyarrow import RecordBatch
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 class HuggingFaceSink(DataSource):
     def __init__(self, options):
@@ -45,6 +48,7 @@ class HuggingFaceSink(DataSource):
         return HuggingFaceDatasetsWriter(
             path=self.path,
             schema=schema,
+            overwrite=overwrite,
             token=self.token,
             endpoint=self.endpoint,
             **self.kwargs,
@@ -57,28 +61,57 @@ class HuggingFaceCommitMessage(WriterCommitMessage):
 
 
 class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
+
     def __init__(
         self,
+        *,
         path: str,
         schema: StructType,
+        overwrite: bool,
         token: str,
         endpoint: Optional[str] = None,
         row_group_size: Optional[int] = None,
-        max_operations_per_commit=50,
+        max_operations_per_commit=25000,
         **kwargs,
     ):
+        import uuid
+
         self.path = path
         self.schema = schema
+        self.overwrite = overwrite
         self.token = token
         self.endpoint = endpoint
         self.row_group_size = row_group_size
         self.max_operations_per_commit = max_operations_per_commit
         self.kwargs = kwargs
 
+        # Use a unique prefix to avoid conflicts with existing files
+        self.prefix = f"{uuid.uuid4()}-"
+
     def get_filesystem(self):
         from huggingface_hub import HfFileSystem
 
         return HfFileSystem(token=self.token, endpoint=self.endpoint)
+
+    def get_delete_operations(self, resolved_path):
+        from huggingface_hub import CommitOperationDelete, list_repo_tree
+        from huggingface_hub.hf_api import RepoFile
+
+        # list all files in the directory
+        objects = list_repo_tree(
+            token=self.token,
+            path_in_repo=resolved_path.path_in_repo,
+            repo_id=resolved_path.repo_id,
+            repo_type=resolved_path.repo_type,
+            revision=resolved_path.revision,
+            expand=False,
+            recursive=False,
+        )
+
+        # delete all parquet files
+        for obj in objects:
+            if isinstance(obj, RepoFile) and obj.path.endswith(".parquet"):
+                yield CommitOperationDelete(path_in_repo=obj.path)
 
     def write(self, iterator: Iterator["RecordBatch"]) -> HuggingFaceCommitMessage:
         import io
@@ -100,10 +133,12 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
                 writer.write_batch(batch, row_group_size=self.row_group_size)
                 is_empty = False
 
-        if is_empty:
+        if is_empty:  # Skip empty partitions
             return HuggingFaceCommitMessage(addition=None)
 
-        name = f"part-{partition_id}.parquet"  # Name of the file in the repo
+        name = (
+            f"{self.prefix}part-{partition_id}.parquet"  # Name of the file in the repo
+        )
         parquet.seek(0)
         addition = CommitOperationAdd(path_in_repo=name, path_or_fileobj=parquet)
 
@@ -116,7 +151,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             revision=resolved_path.revision,
         )
 
-        print(f"Written {name} with content")
+        logger.info(f"Written {name} with content")
         return HuggingFaceCommitMessage(addition=addition)
 
     def commit(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
@@ -124,16 +159,18 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
         fs = self.get_filesystem()
         resolved_path = fs.resolve_path(self.path)
-        additions = [message.addition for message in messages if message.addition]
-        num_commits = math.ceil(len(additions) / self.max_operations_per_commit)
+        operations = [message.addition for message in messages if message.addition]
+        if self.overwrite:
+            operations += list(self.get_delete_operations(resolved_path))
+        num_commits = math.ceil(len(operations) / self.max_operations_per_commit)
+
         for i in range(num_commits):
             begin = i * self.max_operations_per_commit
             end = (i + 1) * self.max_operations_per_commit
-            operations = additions[begin:end]
+            operations = operations[begin:end]
             commit_message = "Upload using PySpark" + (
                 f" (part {i:05d}-of-{num_commits:05d})" if num_commits > 1 else ""
             )
-            print(operations, commit_message)
             fs._api.create_commit(
                 repo_id=resolved_path.repo_id,
                 repo_type=resolved_path.repo_type,
@@ -141,10 +178,10 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
                 operations=operations,
                 commit_message=commit_message,
             )
-            for addition in operations:
-                print(f"Committed {addition.path_in_repo}")
+            for operation in operations:
+                logger.info(f"Committed {operation}")
 
     def abort(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
         additions = [message.addition for message in messages if message.addition]
         for addition in additions:
-            print(f"Aborted {addition.path_in_repo}")
+            logger.info(f"Aborted {addition}")
