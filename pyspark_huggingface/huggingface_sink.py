@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from pyarrow import RecordBatch
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 class HuggingFaceSink(DataSource):
     def __init__(self, options):
@@ -57,7 +56,7 @@ class HuggingFaceSink(DataSource):
 
 @dataclass
 class HuggingFaceCommitMessage(WriterCommitMessage):
-    addition: Optional["CommitOperationAdd"]
+    additions: List["CommitOperationAdd"]
 
 
 class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
@@ -71,7 +70,8 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         token: str,
         endpoint: Optional[str] = None,
         row_group_size: Optional[int] = None,
-        max_operations_per_commit=25000,
+        max_bytes_per_file=500_000_000,
+        max_operations_per_commit=25_000,
         **kwargs,
     ):
         import uuid
@@ -82,22 +82,24 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         self.token = token
         self.endpoint = endpoint
         self.row_group_size = row_group_size
+        self.max_bytes_per_file = max_bytes_per_file
         self.max_operations_per_commit = max_operations_per_commit
         self.kwargs = kwargs
 
-        # Use a unique prefix to avoid conflicts with existing files
-        self.prefix = f"{uuid.uuid4()}-"
+        # Use a unique filename prefix to avoid conflicts with existing files
+        self.uuid = uuid.uuid4()
 
     def get_filesystem(self):
         from huggingface_hub import HfFileSystem
 
         return HfFileSystem(token=self.token, endpoint=self.endpoint)
 
+    # Get the commit operations to delete all existing Parquet files
     def get_delete_operations(self, resolved_path):
         from huggingface_hub import CommitOperationDelete, list_repo_tree
         from huggingface_hub.hf_api import RepoFile
 
-        # list all files in the directory
+        # List all files in the directory
         objects = list_repo_tree(
             token=self.token,
             path_in_repo=resolved_path.path_in_repo,
@@ -108,10 +110,10 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             recursive=False,
         )
 
-        # delete all parquet files
+        # Delete all existing parquet files
         for obj in objects:
             if isinstance(obj, RepoFile) and obj.path.endswith(".parquet"):
-                yield CommitOperationDelete(path_in_repo=obj.path)
+                yield CommitOperationDelete(path_in_repo=obj.path, is_folder=False)
 
     def write(self, iterator: Iterator["RecordBatch"]) -> HuggingFaceCommitMessage:
         import io
@@ -121,49 +123,70 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         from pyspark import TaskContext
         from pyspark.sql.pandas.types import to_arrow_schema
 
+        # Get the current partition ID
         context = TaskContext.get()
         assert context, "No active Spark task context"
         partition_id = context.partitionId()
 
-        schema = to_arrow_schema(self.schema)
-        parquet = io.BytesIO()
-        is_empty = True
-        with pq.ParquetWriter(parquet, schema, **self.kwargs) as writer:
-            for batch in iterator:
-                writer.write_batch(batch, row_group_size=self.row_group_size)
-                is_empty = False
-
-        if is_empty:  # Skip empty partitions
-            return HuggingFaceCommitMessage(addition=None)
-
-        name = (
-            f"{self.prefix}part-{partition_id}.parquet"  # Name of the file in the repo
-        )
-        parquet.seek(0)
-        addition = CommitOperationAdd(path_in_repo=name, path_or_fileobj=parquet)
-
         fs = self.get_filesystem()
         resolved_path = fs.resolve_path(self.path)
-        fs._api.preupload_lfs_files(
-            repo_id=resolved_path.repo_id,
-            additions=[addition],
-            repo_type=resolved_path.repo_type,
-            revision=resolved_path.revision,
-        )
 
-        logger.info(f"Written {name} with content")
-        return HuggingFaceCommitMessage(addition=addition)
+        schema = to_arrow_schema(self.schema)
+        num_files = 0
+        additions = []
+
+        with io.BytesIO() as parquet:
+
+            def flush():
+                nonlocal num_files
+                name = f"{self.uuid}-part-{partition_id}-{num_files}.parquet"  # Name of the file in the repo
+                num_files += 1
+                parquet.seek(0)
+
+                addition = CommitOperationAdd(
+                    path_in_repo=name, path_or_fileobj=parquet
+                )
+                fs._api.preupload_lfs_files(
+                    repo_id=resolved_path.repo_id,
+                    additions=[addition],
+                    repo_type=resolved_path.repo_type,
+                    revision=resolved_path.revision,
+                )
+                additions.append(addition)
+
+                # Reuse the buffer for the next file
+                parquet.seek(0)
+                parquet.truncate()
+
+            # Write the Parquet files, limiting the size of each file
+            while True:
+                with pq.ParquetWriter(parquet, schema, **self.kwargs) as writer:
+                    num_batches = 0
+                    for batch in iterator:
+                        writer.write_batch(batch, row_group_size=self.row_group_size)
+                        num_batches += 1
+                        if parquet.tell() > self.max_bytes_per_file:
+                            flush()
+                            break
+                    else:
+                        if num_batches > 0:
+                            flush()
+                        break
+
+        return HuggingFaceCommitMessage(additions=additions)
 
     def commit(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
         import math
 
         fs = self.get_filesystem()
         resolved_path = fs.resolve_path(self.path)
-        operations = [message.addition for message in messages if message.addition]
-        if self.overwrite:
-            operations += list(self.get_delete_operations(resolved_path))
-        num_commits = math.ceil(len(operations) / self.max_operations_per_commit)
+        operations = [
+            addition for message in messages for addition in message.additions
+        ]
+        if self.overwrite:  # Delete existing files if overwrite is enabled
+            operations.extend(self.get_delete_operations(resolved_path))
 
+        num_commits = math.ceil(len(operations) / self.max_operations_per_commit)
         for i in range(num_commits):
             begin = i * self.max_operations_per_commit
             end = (i + 1) * self.max_operations_per_commit
@@ -178,10 +201,8 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
                 operations=operations,
                 commit_message=commit_message,
             )
-            for operation in operations:
-                logger.info(f"Committed {operation}")
 
     def abort(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
-        additions = [message.addition for message in messages if message.addition]
+        additions = [addition for message in messages for addition in message.additions]
         for addition in additions:
             logger.info(f"Aborted {addition}")
