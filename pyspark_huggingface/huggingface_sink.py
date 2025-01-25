@@ -17,6 +17,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 class HuggingFaceSink(DataSource):
+    """
+    A DataSource for writing Spark DataFrames to HuggingFace Datasets.
+
+    This data source allows writing Spark DataFrames to the HuggingFace Hub as Parquet files.
+    The path must be a valid `hf://` URL.
+
+    Name: `huggingfacesink`
+
+    Data Source Options:
+    - token (str, required): HuggingFace API token for authentication.
+    - endpoint (str): Custom HuggingFace API endpoint URL.
+    - max_bytes_per_file (int): Maximum size of each Parquet file.
+    - row_group_size (int): Row group size when writing Parquet files.
+    - max_operations_per_commit (int): Maximum number of files to add/delete per commit.
+
+    Modes:
+    - `overwrite`: Overwrite an existing dataset by deleting existing Parquet files.
+    - `append`: Append data to an existing dataset.
+
+    Examples
+    --------
+
+    Write a DataFrame to the HuggingFace Hub.
+
+    >>> df.write.format("huggingfacesink").mode("overwrite").options(token="...").save("hf://datasets/user/dataset")
+
+    Append data to an existing dataset on the HuggingFace Hub.
+
+    >>> df.write.format("huggingfacesink").mode("append").options(token="...").save("hf://datasets/user/dataset")
+
+    Write data to configuration `en` and split `train` of a dataset.
+
+    >>> df.write.format("huggingfacesink").mode("overwrite").options(token="...").save("hf://datasets/user/dataset/en/train")
+    """
+
     def __init__(self, options):
         super().__init__(options)
 
@@ -96,27 +131,32 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
     # Get the commit operations to delete all existing Parquet files
     def get_delete_operations(self, resolved_path):
-        from huggingface_hub import CommitOperationDelete, list_repo_tree
+        from huggingface_hub import CommitOperationDelete
         from huggingface_hub.hf_api import RepoFile
+        from huggingface_hub.errors import EntryNotFoundError
+
+        fs = self.get_filesystem()
 
         # List all files in the directory
-        objects = list_repo_tree(
-            token=self.token,
-            path_in_repo=resolved_path.path_in_repo,
-            repo_id=resolved_path.repo_id,
-            repo_type=resolved_path.repo_type,
-            revision=resolved_path.revision,
-            expand=False,
-            recursive=False,
-        )
-
-        # Delete all existing parquet files
-        for obj in objects:
-            if isinstance(obj, RepoFile) and obj.path.endswith(".parquet"):
-                yield CommitOperationDelete(path_in_repo=obj.path, is_folder=False)
+        try:
+            # Delete all existing parquet files
+            objects = fs._api.list_repo_tree(
+                path_in_repo=resolved_path.path_in_repo,
+                repo_id=resolved_path.repo_id,
+                repo_type=resolved_path.repo_type,
+                revision=resolved_path.revision,
+                expand=False,
+                recursive=False,
+            )
+            for obj in objects:
+                if isinstance(obj, RepoFile) and obj.path.endswith(".parquet"):
+                    yield CommitOperationDelete(path_in_repo=obj.path, is_folder=False)
+        except EntryNotFoundError as e:
+            logger.info(f"Writing to a new path: {e}")
 
     def write(self, iterator: Iterator["RecordBatch"]) -> HuggingFaceCommitMessage:
         import io
+        import os
 
         from huggingface_hub import CommitOperationAdd
         from pyarrow import parquet as pq
@@ -140,11 +180,12 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             def flush():
                 nonlocal num_files
                 name = f"{self.uuid}-part-{partition_id}-{num_files}.parquet"  # Name of the file in the repo
+                path_in_repo = os.path.join(resolved_path.path_in_repo, name)
                 num_files += 1
                 parquet.seek(0)
 
                 addition = CommitOperationAdd(
-                    path_in_repo=name, path_or_fileobj=parquet
+                    path_in_repo=path_in_repo, path_or_fileobj=parquet
                 )
                 fs._api.preupload_lfs_files(
                     repo_id=resolved_path.repo_id,
