@@ -174,8 +174,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
         # Get the current partition ID. Use this to generate unique filenames for each partition.
         context = TaskContext.get()
-        assert context, "No active Spark task context"
-        partition_id = context.partitionId()
+        partition_id = context.partitionId() if context else 0
 
         fs = self.get_filesystem()
         resolved_path = fs.resolve_path(self.path)
