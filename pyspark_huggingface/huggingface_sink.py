@@ -143,8 +143,8 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         This is used when `overwrite=True` to clear the target directory.
         """
         from huggingface_hub import CommitOperationDelete
-        from huggingface_hub.hf_api import RepoFile
         from huggingface_hub.errors import EntryNotFoundError
+        from huggingface_hub.hf_api import RepoFile
 
         fs = self.get_filesystem()
 
