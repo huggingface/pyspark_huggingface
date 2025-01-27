@@ -6,6 +6,8 @@ from pyspark.testing import assertDataFrameEqual
 from pytest_mock import MockerFixture
 
 
+# ============== Fixtures & Helpers ==============
+
 @pytest.fixture(scope="session")
 def spark():
     from pyspark_huggingface.huggingface_sink import HuggingFaceSink
@@ -55,6 +57,8 @@ def repo(api, username):
     yield repo_id
     api.delete_repo(repo_id, repo_type="dataset")
 
+
+# ============== Tests ==============
 
 def test_basic(spark, repo, random_df):
     df = random_df(10)
@@ -106,7 +110,6 @@ def test_max_bytes_per_file(spark, mocker: MockerFixture):
 
     repo = "user/test"
     fs = mocker.patch("huggingface_hub.HfFileSystem").return_value = mocker.MagicMock()
-    # mock fs._api.preupload_lfs_files
     resolved_path = fs.resolve_path.return_value = mocker.MagicMock()
     resolved_path.path_in_repo = repo
     resolved_path.repo_id = repo
