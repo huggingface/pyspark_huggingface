@@ -277,7 +277,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
         """
         Split the commit into multiple parts if necessary.
-        The HuggingFace API has a limit of 25,000 operations per commit.
+        The HuggingFace API may time out if there are too many operations in a single commit.
         """
         num_commits = math.ceil(len(operations) / self.max_operations_per_commit)
         for i in range(num_commits):
