@@ -1,5 +1,6 @@
 import ast
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, List, Optional
 
@@ -11,11 +12,7 @@ from pyspark.sql.datasource import (
 from pyspark.sql.types import StructType
 
 if TYPE_CHECKING:
-    from huggingface_hub import (
-        CommitOperationAdd,
-        CommitOperationDelete,
-        HfFileSystemResolvedPath,
-    )
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete
     from pyarrow import RecordBatch
 
 logger = logging.getLogger(__name__)
@@ -28,12 +25,12 @@ class HuggingFaceSink(DataSource):
 
     Name: `huggingfacesink`
 
-    Path:
-    - The path must be a valid HuggingFace dataset path, e.g. `{user}/{repo}` or `{user}/{repo}/{split}`.
-    - A revision can be specified using the `@` symbol, e.g. `{user}/{repo}@{revision}`.
-
     Data Source Options:
     - token (str, required): HuggingFace API token for authentication.
+    - path (str, required): HuggingFace repository ID, e.g. `{username}/{dataset}`.
+    - path_in_repo (str): Path within the repository to write the data. Defaults to the root.
+    - split (str): Split name to write the data to. Defaults to `train`. Only `train`, `test`, and `validation` are supported.
+    - revision (str): Branch, tag, or commit to write to. Defaults to the main branch.
     - endpoint (str): Custom HuggingFace API endpoint URL.
     - max_bytes_per_file (int): Maximum size of each Parquet file.
     - row_group_size (int): Row group size when writing Parquet files.
@@ -50,13 +47,13 @@ class HuggingFaceSink(DataSource):
 
     >>> df.write.format("huggingfacesink").mode("overwrite").options(token="...").save("user/dataset")
 
-    Append to an existing directory on the HuggingFace Hub.
+    Append to an existing dataset on the HuggingFace Hub.
 
     >>> df.write.format("huggingfacesink").mode("append").options(token="...").save("user/dataset")
 
     Write to the `test` split of a dataset.
 
-    >>> df.write.format("huggingfacesink").mode("overwrite").options(token="...").save("user/dataset/test")
+    >>> df.write.format("huggingfacesink").mode("overwrite").options(token="...", split="test").save("user/dataset")
     """
 
     def __init__(self, options):
@@ -66,8 +63,11 @@ class HuggingFaceSink(DataSource):
             raise Exception("You must specify a dataset name.")
 
         kwargs = dict(self.options)
-        self.path = kwargs.pop("path")
         self.token = kwargs.pop("token")
+        self.repo_id = kwargs.pop("path")
+        self.path_in_repo = kwargs.pop("path_in_repo", None)
+        self.split = kwargs.pop("split", None)
+        self.revision = kwargs.pop("revision", None)
         self.endpoint = kwargs.pop("endpoint", None)
         for arg in kwargs:
             if kwargs[arg].lower() == "true":
@@ -87,7 +87,10 @@ class HuggingFaceSink(DataSource):
 
     def writer(self, schema: StructType, overwrite: bool) -> DataSourceArrowWriter:
         return HuggingFaceDatasetsWriter(
-            path=self.path,
+            repo_id=self.repo_id,
+            path_in_repo=self.path_in_repo,
+            split=self.split,
+            revision=self.revision,
             schema=schema,
             overwrite=overwrite,
             token=self.token,
@@ -102,22 +105,30 @@ class HuggingFaceCommitMessage(WriterCommitMessage):
 
 
 class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
+    repo_type = "dataset"
+
     def __init__(
         self,
         *,
-        path: str,
+        repo_id: str,
+        path_in_repo: Optional[str] = None,
+        split: Optional[str] = None,
+        revision: Optional[str] = None,
         schema: StructType,
         overwrite: bool,
         token: str,
         endpoint: Optional[str] = None,
         row_group_size: Optional[int] = None,
         max_bytes_per_file=500_000_000,
-        max_operations_per_commit=25_000,
+        max_operations_per_commit=100,
         **kwargs,
     ):
         import uuid
 
-        self.path = f"datasets/{path}"
+        self.repo_id = repo_id
+        self.path_in_repo = (path_in_repo or "").strip("/")
+        self.split = split or "train"
+        self.revision = revision
         self.schema = schema
         self.overwrite = overwrite
         self.token = token
@@ -130,42 +141,53 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         # Use a unique filename prefix to avoid conflicts with existing files
         self.uuid = uuid.uuid4()
 
-    def get_filesystem(self):
-        from huggingface_hub import HfFileSystem
+        self.validate()
 
-        return HfFileSystem(token=self.token, endpoint=self.endpoint)
+    def validate(self):
+        if self.split not in ["train", "test", "validation"]:
+            raise NotImplementedError(
+                f"Only 'train', 'test', and 'validation' splits are supported. Got '{self.split}'."
+            )
 
-    def get_delete_operations(
-        self, resolved_path: "HfFileSystemResolvedPath"
-    ) -> Iterator["CommitOperationDelete"]:
+    def get_api(self):
+        from huggingface_hub import HfApi
+
+        return HfApi(token=self.token, endpoint=self.endpoint)
+
+    @property
+    def prefix(self) -> str:
+        return os.path.join(self.path_in_repo, self.split)
+
+    def get_delete_operations(self) -> Iterator["CommitOperationDelete"]:
         """
         Get the commit operations to delete all existing Parquet files.
         This is used when `overwrite=True` to clear the target directory.
         """
         from huggingface_hub import CommitOperationDelete
         from huggingface_hub.errors import EntryNotFoundError
-        from huggingface_hub.hf_api import RepoFile
+        from huggingface_hub.hf_api import RepoFolder
 
-        fs = self.get_filesystem()
+        api = self.get_api()
 
         try:
-            objects = fs._api.list_repo_tree(
-                path_in_repo=resolved_path.path_in_repo,
-                repo_id=resolved_path.repo_id,
-                repo_type=resolved_path.repo_type,
-                revision=resolved_path.revision,
+            objects = api.list_repo_tree(
+                path_in_repo=self.path_in_repo,
+                repo_id=self.repo_id,
+                repo_type=self.repo_type,
+                revision=self.revision,
                 expand=False,
                 recursive=False,
             )
             for obj in objects:
-                if isinstance(obj, RepoFile) and obj.path.endswith(".parquet"):
-                    yield CommitOperationDelete(path_in_repo=obj.path, is_folder=False)
+                if obj.path.startswith(self.prefix):
+                    yield CommitOperationDelete(
+                        path_in_repo=obj.path, is_folder=isinstance(obj, RepoFolder)
+                    )
         except EntryNotFoundError as e:
             logger.info(f"Writing to a new path: {e}")
 
     def write(self, iterator: Iterator["RecordBatch"]) -> HuggingFaceCommitMessage:
         import io
-        import os
 
         from huggingface_hub import CommitOperationAdd
         from pyarrow import parquet as pq
@@ -176,8 +198,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         context = TaskContext.get()
         partition_id = context.partitionId() if context else 0
 
-        fs = self.get_filesystem()
-        resolved_path = fs.resolve_path(self.path)
+        api = self.get_api()
 
         schema = to_arrow_schema(self.schema)
         num_files = 0
@@ -192,19 +213,20 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
                 """
                 writer.close()  # Close the writer to flush the buffer
                 nonlocal num_files
-                name = f"{self.uuid}-part-{partition_id}-{num_files}.parquet"  # Name of the file in the repo
-                path_in_repo = os.path.join(resolved_path.path_in_repo, name)
+                name = (
+                    f"{self.prefix}-{self.uuid}-part-{partition_id}-{num_files}.parquet"
+                )
                 num_files += 1
                 parquet.seek(0)
 
                 addition = CommitOperationAdd(
-                    path_in_repo=path_in_repo, path_or_fileobj=parquet
+                    path_in_repo=name, path_or_fileobj=parquet
                 )
-                fs._api.preupload_lfs_files(
-                    repo_id=resolved_path.repo_id,
+                api.preupload_lfs_files(
+                    repo_id=self.repo_id,
                     additions=[addition],
-                    repo_type=resolved_path.repo_type,
-                    revision=resolved_path.revision,
+                    repo_type=self.repo_type,
+                    revision=self.revision,
                 )
                 additions.append(addition)
 
@@ -235,13 +257,12 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
     def commit(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
         import math
 
-        fs = self.get_filesystem()
-        resolved_path = fs.resolve_path(self.path)
+        api = self.get_api()
         operations = [
             addition for message in messages for addition in message.additions
         ]
         if self.overwrite:  # Delete existing files if overwrite is enabled
-            operations.extend(self.get_delete_operations(resolved_path))
+            operations.extend(self.get_delete_operations())
 
         """
         Split the commit into multiple parts if necessary.
@@ -255,10 +276,10 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             commit_message = "Upload using PySpark" + (
                 f" (part {i:05d}-of-{num_commits:05d})" if num_commits > 1 else ""
             )
-            fs._api.create_commit(
-                repo_id=resolved_path.repo_id,
-                repo_type=resolved_path.repo_type,
-                revision=resolved_path.revision,
+            api.create_commit(
+                repo_id=self.repo_id,
+                repo_type=self.repo_type,
+                revision=self.revision,
                 operations=part,
                 commit_message=commit_message,
             )
