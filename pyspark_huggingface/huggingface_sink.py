@@ -145,6 +145,17 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
     def validate(self):
         if self.split not in ["train", "test", "validation"]:
+            """
+            TODO: Add support for custom splits.
+
+            For custom split names to be recognized, the files must have path with format:
+            `data/{split}-{iiiii}-of-{nnnnn}.parquet`
+            where `iiiii` is the part number and `nnnnn` is the total number of parts, both padded to 5 digits.
+            Example: `data/custom-00000-of-00002.parquet`
+
+            Therefore the current usage of UUID to avoid naming conflicts won't work for custom split names.
+            To fix this we can rename the files in the commit phase to satisfy the naming convention.
+            """
             raise NotImplementedError(
                 f"Only 'train', 'test', and 'validation' splits are supported. Got '{self.split}'."
             )
