@@ -1,7 +1,7 @@
 import ast
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional, Union
 
 from pyspark.sql.datasource import (
     DataSource,
@@ -11,7 +11,13 @@ from pyspark.sql.datasource import (
 from pyspark.sql.types import StructType
 
 if TYPE_CHECKING:
-    from huggingface_hub import CommitOperationAdd, CommitOperationDelete
+    from huggingface_hub import (
+        CommitOperation,
+        CommitOperationAdd,
+        CommitOperationDelete,
+        HfApi,
+    )
+    from huggingface_hub.hf_api import RepoFile, RepoFolder
     from pyarrow import RecordBatch
 
 logger = logging.getLogger(__name__)
@@ -27,8 +33,8 @@ class HuggingFaceSink(DataSource):
     Data Source Options:
     - token (str, required): HuggingFace API token for authentication.
     - path (str, required): HuggingFace repository ID, e.g. `{username}/{dataset}`.
-    - path_in_repo (str): Path within the repository to write the data. Defaults to the root.
-    - split (str): Split name to write the data to. Defaults to `train`. Only `train`, `test`, and `validation` are supported.
+    - path_in_repo (str): Path within the repository to write the data. Defaults to "data".
+    - split (str): Split name to write the data to. Defaults to `train`.
     - revision (str): Branch, tag, or commit to write to. Defaults to the main branch.
     - endpoint (str): Custom HuggingFace API endpoint URL.
     - max_bytes_per_file (int): Maximum size of each Parquet file.
@@ -125,7 +131,9 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         import uuid
 
         self.repo_id = repo_id
-        self.path_in_repo = (path_in_repo or "").strip("/")
+        self.path_in_repo = (
+            path_in_repo.strip("/") if path_in_repo is not None else "data"
+        )
         self.split = split or "train"
         self.revision = revision
         self.schema = schema
@@ -140,26 +148,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         # Use a unique filename prefix to avoid conflicts with existing files
         self.uuid = uuid.uuid4()
 
-        self.validate()
-
-    def validate(self):
-        if self.split not in ["train", "test", "validation"]:
-            """
-            TODO: Add support for custom splits.
-
-            For custom split names to be recognized, the files must have path with format:
-            `data/{split}-{iiiii}-of-{nnnnn}.parquet`
-            where `iiiii` is the part number and `nnnnn` is the total number of parts, both padded to 5 digits.
-            Example: `data/custom-00000-of-00002.parquet`
-
-            Therefore the current usage of UUID to avoid naming conflicts won't work for custom split names.
-            To fix this we can rename the files in the commit phase to satisfy the naming convention.
-            """
-            raise NotImplementedError(
-                f"Only 'train', 'test', and 'validation' splits are supported. Got '{self.split}'."
-            )
-
-    def get_api(self):
+    def _get_api(self):
         from huggingface_hub import HfApi
 
         return HfApi(token=self.token, endpoint=self.endpoint)
@@ -168,16 +157,11 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
     def prefix(self) -> str:
         return f"{self.path_in_repo}/{self.split}".strip("/")
 
-    def get_delete_operations(self) -> Iterator["CommitOperationDelete"]:
+    def _list_split(self, api: "HfApi") -> Iterator[Union["RepoFile", "RepoFolder"]]:
         """
-        Get the commit operations to delete all existing Parquet files.
-        This is used when `overwrite=True` to clear the target directory.
+        Get all existing files of the current split.
         """
-        from huggingface_hub import CommitOperationDelete
         from huggingface_hub.errors import EntryNotFoundError
-        from huggingface_hub.hf_api import RepoFolder
-
-        api = self.get_api()
 
         try:
             objects = api.list_repo_tree(
@@ -190,11 +174,48 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             )
             for obj in objects:
                 if obj.path.startswith(self.prefix):
-                    yield CommitOperationDelete(
-                        path_in_repo=obj.path, is_folder=isinstance(obj, RepoFolder)
+                    yield obj
+        except EntryNotFoundError:
+            pass
+
+    def _get_rename_operations(
+        self, api: "HfApi", additions: List["CommitOperationAdd"]
+    ) -> Iterator["CommitOperation"]:
+        """
+        Note: mutates additions to update the path_in_repo of each addition.
+        """
+        from huggingface_hub import CommitOperationCopy, CommitOperationDelete
+        from huggingface_hub.hf_api import RepoFile, RepoFolder
+
+        count_new = len(additions)
+        count_existing = 0
+
+        def format_path(i):
+            return f"{self.prefix}-{i:05d}-of-{count_new + count_existing:05d}.parquet"
+
+        # Rename existing files to have the correct total number of parts
+        if not self.overwrite:
+            existing = list(
+                obj for obj in self._list_split(api) if isinstance(obj, RepoFile)
+            )
+            count_existing = len(existing)
+            for i, obj in enumerate(existing):
+                new_path = format_path(i)
+                if obj.path != new_path:
+                    yield CommitOperationCopy(
+                        src_path_in_repo=obj.path, path_in_repo=new_path
                     )
-        except EntryNotFoundError as e:
-            logger.info(f"Writing to a new path: {e}")
+                    yield CommitOperationDelete(path_in_repo=obj.path)
+        # Otherwise, delete existing files
+        else:
+            for obj in self._list_split(api):
+                yield CommitOperationDelete(
+                    path_in_repo=obj.path, is_folder=isinstance(obj, RepoFolder)
+                )
+
+        # Rename additions
+        for i, addition in enumerate(additions):
+            addition.path_in_repo = format_path(i + count_existing)
 
     def write(self, iterator: Iterator["RecordBatch"]) -> HuggingFaceCommitMessage:
         import io
@@ -208,7 +229,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         context = TaskContext.get()
         partition_id = context.partitionId() if context else 0
 
-        api = self.get_api()
+        api = self._get_api()
 
         schema = to_arrow_schema(self.schema)
         num_files = 0
@@ -265,25 +286,40 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         return HuggingFaceCommitMessage(additions=additions)
 
     def commit(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
-        import math
+        api = self._get_api()
 
-        api = self.get_api()
         operations = [
             addition for message in messages for addition in message.additions
         ]
-        if self.overwrite:  # Delete existing files if overwrite is enabled
-            operations.extend(self.get_delete_operations())
+        prepare_operations = list(self._get_rename_operations(api, operations))
 
+        self._create_commits(
+            api,
+            operations=prepare_operations,
+            message="Prepare for upload using PySpark",
+        )
+
+        self._create_commits(
+            api,
+            operations=operations,
+            message="Upload using PySpark",
+        )
+
+    def _create_commits(
+        self, api: "HfApi", operations: List["CommitOperation"], message: str
+    ) -> None:
         """
         Split the commit into multiple parts if necessary.
         The HuggingFace API may time out if there are too many operations in a single commit.
         """
+        import math
+
         num_commits = math.ceil(len(operations) / self.max_operations_per_commit)
         for i in range(num_commits):
             begin = i * self.max_operations_per_commit
             end = (i + 1) * self.max_operations_per_commit
             part = operations[begin:end]
-            commit_message = "Upload using PySpark" + (
+            commit_message = message + (
                 f" (part {i:05d}-of-{num_commits:05d})" if num_commits > 1 else ""
             )
             api.create_commit(
