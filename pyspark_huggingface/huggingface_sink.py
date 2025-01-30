@@ -1,6 +1,5 @@
 import ast
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, List, Optional
 
@@ -167,7 +166,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
     @property
     def prefix(self) -> str:
-        return os.path.join(self.path_in_repo, self.split)
+        return f"{self.path_in_repo}/{self.split}".strip("/")
 
     def get_delete_operations(self) -> Iterator["CommitOperationDelete"]:
         """
