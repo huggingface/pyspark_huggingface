@@ -177,11 +177,17 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         except EntryNotFoundError:
             pass
 
-    def _get_rename_operations(
+    def _prepare_operations(
         self, api: "HfApi", additions: List["CommitOperationAdd"]
     ) -> Iterator["CommitOperation"]:
         """
-        Note: mutates additions to update the path_in_repo of each addition.
+        Prepare operations for upload.
+        - Rename files to be recognizable by HuggingFace: `{split}-{current:05d}-of-{total:05d}.parquet`
+        - Delete existing files if `overwrite=True`
+
+        See: https://huggingface.co/docs/hub/en/datasets-file-names-and-splits
+
+        Note: additions are mutated to update the path_in_repo to the new filename.
         """
         from huggingface_hub import CommitOperationCopy, CommitOperationDelete
         from huggingface_hub.hf_api import RepoFile, RepoFolder
@@ -290,14 +296,17 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         operations = [
             addition for message in messages for addition in message.additions
         ]
-        prepare_operations = list(self._get_rename_operations(api, operations))
+        prepare_operations = list(self._prepare_operations(api, operations))
 
+        # First rename existing files or delete files to be overwritten
         self._create_commits(
             api,
             operations=prepare_operations,
             message="Prepare for upload using PySpark",
         )
 
+        # Then upload the new files
+        # This is a separate commit to avoid conflicts when e.g. a renamed file's old name is the same as a new file
         self._create_commits(
             api,
             operations=operations,
