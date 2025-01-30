@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from huggingface_hub import (
         CommitOperation,
         CommitOperationAdd,
-        CommitOperationDelete,
         HfApi,
     )
     from huggingface_hub.hf_api import RepoFile, RepoFolder
