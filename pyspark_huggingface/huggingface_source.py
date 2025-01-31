@@ -125,11 +125,11 @@ class HuggingFaceSource(DataSource):
 @dataclass
 class Shard(InputPartition):
     """ Represents a dataset shard. """
-
     index: int
 
 
 class HuggingFaceDatasetsReader(DataSourceReader):
+
     def __init__(self, schema: StructType, builder: "DatasetBuilder", split: str, streaming_dataset: Optional["IterableDataset"]):
         self.schema = schema
         self.builder = builder
