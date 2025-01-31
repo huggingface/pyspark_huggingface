@@ -8,6 +8,19 @@ from pyspark_huggingface.huggingface_source import HuggingFaceSource
 
 
 class HuggingFaceDatasets(DataSource):
+    """
+    DataSource for reading and writing HuggingFace Datasets in Spark.
+
+    Read
+    ------
+    See :py:class:`HuggingFaceSource` for more details.
+
+    Write
+    ------
+    See :py:class:`HuggingFaceSink` for more details.
+    """
+
+    # Delegate the source and sink methods to the respective classes.
     def __init__(self, options: dict):
         super().__init__(options)
         self.options = options
@@ -15,19 +28,13 @@ class HuggingFaceDatasets(DataSource):
         self.sink: Optional[HuggingFaceSink] = None
 
     def get_source(self) -> HuggingFaceSource:
-        assert (
-            self.sink is None
-        ), "Cannot read and write from the same data source instance"
         if self.source is None:
-            self.source = HuggingFaceSource(self.options)
+            self.source = HuggingFaceSource(self.options.copy())
         return self.source
 
     def get_sink(self):
-        assert (
-            self.source is None
-        ), "Cannot read and write from the same data source instance"
         if self.sink is None:
-            self.sink = HuggingFaceSink(self.options)
+            self.sink = HuggingFaceSink(self.options.copy())
         return self.sink
 
     @classmethod
