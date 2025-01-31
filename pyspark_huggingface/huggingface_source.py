@@ -9,7 +9,8 @@ from pyspark.sql.types import StructType
 if TYPE_CHECKING:
     from datasets import DatasetBuilder, IterableDataset
 
-class HuggingFaceDatasets(DataSource):
+
+class HuggingFaceSource(DataSource):
     """
     A DataSource for reading and writing HuggingFace Datasets in Spark.
 
@@ -97,10 +98,14 @@ class HuggingFaceDatasets(DataSource):
                 except ValueError:
                     pass
 
-        self.builder = load_dataset_builder(self.dataset_name, self.config_name, **kwargs)
+        self.builder = load_dataset_builder(
+            self.dataset_name, self.config_name, **kwargs
+        )
         streaming_dataset = self.builder.as_streaming_dataset()
         if self.split not in streaming_dataset:
-            raise Exception(f"Split {self.split} is invalid. Valid options are {list(streaming_dataset)}")
+            raise Exception(
+                f"Split {self.split} is invalid. Valid options are {list(streaming_dataset)}"
+            )
 
         self.streaming_dataset = streaming_dataset[self.split]
         if not self.streaming_dataset.features:
@@ -108,7 +113,7 @@ class HuggingFaceDatasets(DataSource):
 
     @classmethod
     def name(cls):
-        return "huggingface"
+        return "huggingfacesource"
 
     def schema(self):
         return from_arrow_schema(self.streaming_dataset.features.arrow_schema)
@@ -118,19 +123,25 @@ class HuggingFaceDatasets(DataSource):
             schema,
             builder=self.builder,
             split=self.split,
-            streaming_dataset=self.streaming_dataset if self.streaming else None
+            streaming_dataset=self.streaming_dataset if self.streaming else None,
         )
 
 
 @dataclass
 class Shard(InputPartition):
-    """ Represents a dataset shard. """
+    """Represents a dataset shard."""
+
     index: int
 
 
 class HuggingFaceDatasetsReader(DataSourceReader):
-
-    def __init__(self, schema: StructType, builder: "DatasetBuilder", split: str, streaming_dataset: Optional["IterableDataset"]):
+    def __init__(
+        self,
+        schema: StructType,
+        builder: "DatasetBuilder",
+        split: str,
+        streaming_dataset: Optional["IterableDataset"],
+    ):
         self.schema = schema
         self.builder = builder
         self.split = split
@@ -146,7 +157,9 @@ class HuggingFaceDatasetsReader(DataSourceReader):
     def read(self, partition: Shard):
         columns = [field.name for field in self.schema.fields]
         if self.streaming_dataset:
-            shard = self.streaming_dataset.shard(num_shards=self.streaming_dataset.num_shards, index=partition.index)
+            shard = self.streaming_dataset.shard(
+                num_shards=self.streaming_dataset.num_shards, index=partition.index
+            )
             if shard._ex_iterable.iter_arrow:
                 for _, pa_table in shard._ex_iterable.iter_arrow():
                     yield from pa_table.select(columns).to_batches()
