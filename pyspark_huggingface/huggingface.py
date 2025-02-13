@@ -5,6 +5,7 @@ from pyspark.sql.datasource import DataSource
 if TYPE_CHECKING:
     from pyspark.sql.datasource import DataSourceArrowWriter, DataSourceReader
     from pyspark.sql.types import StructType
+
     from pyspark_huggingface.huggingface_sink import HuggingFaceSink
     from pyspark_huggingface.huggingface_source import HuggingFaceSource
 
