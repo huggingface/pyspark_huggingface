@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Optional
 from pyspark.sql.datasource import DataSource
 
 if TYPE_CHECKING:
-    from pyspark.sql.datasource import DataSourceArrowWriter, DataSourceReader
+    from pyspark.sql.datasource import DataSourceWriter, DataSourceReader
     from pyspark.sql.types import StructType
 
     from pyspark_huggingface.huggingface_sink import HuggingFaceSink
@@ -54,5 +54,5 @@ class HuggingFaceDatasets(DataSource):
     def reader(self, schema: "StructType") -> "DataSourceReader":
         return self.get_source().reader(schema)
 
-    def writer(self, schema: "StructType", overwrite: bool) -> "DataSourceArrowWriter":
+    def writer(self, schema: "StructType", overwrite: bool) -> "DataSourceWriter":
         return self.get_sink().writer(schema, overwrite)
