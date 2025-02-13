@@ -11,12 +11,8 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.9"
-datasets = {version = "^3.2", optional = true}
-huggingface_hub = {version = "^0.27.1", optional = true}
-
-[tool.poetry.extras]
-datasets = ["datasets"]
-huggingface_hub = ["huggingface_hub"]
+datasets = "^3.2"
+huggingface_hub = "^0.27.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
