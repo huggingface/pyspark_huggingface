@@ -1420,7 +1420,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/9d/0e/5b38d51f1b1c2618c
 
 [[package]]
 name = "pyspark-huggingface"
-version = "0.1.1"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "datasets" },

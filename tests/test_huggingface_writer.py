@@ -16,6 +16,8 @@ def spark():
 
 
 def token():
+    if "HF_TOKEN" not in os.environ:
+        pytest.skip("HF_TOKEN environment variable is not set")
     return os.environ["HF_TOKEN"]
 
 
