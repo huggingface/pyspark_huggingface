@@ -1392,6 +1392,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyarrow-stubs"
+version = "19.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyarrow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a7/94/e914eafd588406ba0d66eec2676c894e380962bd856151992aa317f0d8ad/pyarrow_stubs-19.4.tar.gz", hash = "sha256:58c983b68e63a07133741b48edfad85a4fb61bf227fda890c01850868dbfe560", size = 89075, upload-time = "2025-05-14T03:48:35.399Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/c7/0bc3343e48b0bf82582c12e773eb6995e488dc162b331a48a29e6992359c/pyarrow_stubs-19.4-py3-none-any.whl", hash = "sha256:d20b4a04a31e3d93240c057e7a8259587b5dc6db24f8b507f9eac1b209d9ba0c", size = 83824, upload-time = "2025-05-14T03:48:36.285Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "2.22"
 source = { registry = "https://pypi.org/simple" }
@@ -1430,6 +1442,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
+    { name = "pyarrow-stubs" },
     { name = "pyspark" },
     { name = "pytest" },
     { name = "pytest-dotenv" },
@@ -1445,6 +1458,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "ipykernel", specifier = ">=6.29.5" },
+    { name = "pyarrow-stubs", specifier = ">=19.4" },
     { name = "pyspark", specifier = ">=4.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-dotenv", specifier = ">=0.5.2" },
