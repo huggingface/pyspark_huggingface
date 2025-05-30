@@ -1,8 +1,10 @@
 import os
 import uuid
 
+import pyarrow as pa
 import pytest
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.pandas.types import to_arrow_schema
 from pyspark.testing import assertDataFrameEqual
 from pytest_mock import MockerFixture
 
@@ -114,7 +116,7 @@ def test_revision(repo, random_df, api):
     )
 
 
-def test_max_bytes_per_file(spark, mocker: MockerFixture):
+def test_max_bytes_per_file(spark: SparkSession, mocker: MockerFixture):
     from pyspark_huggingface.huggingface_sink import HuggingFaceDatasetsWriter
 
     repo = "user/test"
@@ -128,5 +130,9 @@ def test_max_bytes_per_file(spark, mocker: MockerFixture):
         token="token",
         max_bytes_per_file=1,
     )
-    writer.write(iter(df.toArrow().to_batches(max_chunksize=1)))
+    # Don't use toArrow() because it's not available in pyspark 3.x
+    arrow_table = pa.Table.from_pylist(
+        [row.asDict() for row in df.collect()], schema=to_arrow_schema(df.schema)
+    )
+    writer.write(iter(arrow_table.to_batches(max_chunksize=1)))
     assert api.preupload_lfs_files.call_count == 10
