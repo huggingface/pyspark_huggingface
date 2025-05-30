@@ -12,10 +12,10 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.9', '3.13']
-        packages: ['pyspark>=4.0.0', 'pyspark==3.5.6 numpy<2.0.0']
+        packages: [['pyspark>=4.0.0'], ['pyspark==3.5.6', 'numpy<2.0.0']]
         exclude:
           - python-version: '3.13'
-            packages: 'pyspark==3.5.6'
+            packages: ['pyspark==3.5.6', 'numpy<2.0.0']
       fail-fast: false
 
     steps:
@@ -33,7 +33,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv add --no-sync --dev ${{ matrix.packages }}
+        uv add --no-sync --dev "${{ join(matrix.packages, '" "') }}"
         uv sync --python ${{ matrix.python-version }}
 
     - name: Run tests
