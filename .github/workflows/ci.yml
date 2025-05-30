@@ -33,8 +33,9 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv add --no-sync --dev "${{ join(matrix.packages, '" "') }}"
-        uv sync --python ${{ matrix.python-version }}
+        echo "${{ matrix.python-version }}" > .python-version
+        uv add --dev "${{ join(matrix.packages, '" "') }}"
+        uv sync
 
     - name: Run tests
       run: |
