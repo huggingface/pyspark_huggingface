@@ -6,6 +6,8 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.testing import assertDataFrameEqual
 from pytest_mock import MockerFixture
 
+import pyspark_huggingface  # noqa: F401
+
 # ============== Fixtures & Helpers ==============
 
 
