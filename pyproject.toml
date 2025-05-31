@@ -5,6 +5,7 @@ description = "A DataSource for reading and writing HuggingFace Datasets in Spar
 authors = [
     {name = "allisonwang-db", email = "allison.wang@databricks.com"},
     {name = "lhoestq", email = "quentin@huggingface.co"},
+    {name = "wengh", email = "wenghy02@gmail.com"},
 ]
 license = {text = "Apache License 2.0"}
 readme = "README.md"
