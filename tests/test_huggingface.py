@@ -1,6 +1,9 @@
 import pytest
 from pyspark.sql import SparkSession
 
+import pyspark_huggingface  # noqa: F401
+
+
 @pytest.fixture
 def spark():
     spark = SparkSession.builder.getOrCreate()

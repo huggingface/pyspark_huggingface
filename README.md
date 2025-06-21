@@ -43,7 +43,7 @@ Save to Hugging Face:
 df.write.format("huggingface").save("username/my_dataset")
 # Or pass a token manually
 df.write.format("huggingface").option("token", "hf_xxx").save("username/my_dataset")
-``` 
+```
 
 ## Advanced
 
@@ -91,3 +91,14 @@ huggingface datasource enabled for pyspark 3.x.x (backport from pyspark 4)
 
 The import is only necessary on Spark 3.x to enable the backport.
 Spark 4 automatically imports `pyspark_huggingface` as soon as it is installed, and registers the "huggingface" data source.
+
+
+## Development
+
+[Install uv](https://docs.astral.sh/uv/getting-started/installation/) if not already done.
+
+Then, from the project root directory, sync dependencies and run tests.
+```
+uv sync
+uv run pytest
+```

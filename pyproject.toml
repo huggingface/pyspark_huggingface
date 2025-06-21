@@ -1,24 +1,33 @@
-[tool.poetry]
+[project]
 name = "pyspark_huggingface"
 version = "1.0.0"
 description = "A DataSource for reading and writing HuggingFace Datasets in Spark"
-authors = ["allisonwang-db <allison.wang@databricks.com>", "lhoestq <quentin@huggingface.co>"]
-license = "Apache License 2.0"
+authors = [
+    {name = "allisonwang-db", email = "allison.wang@databricks.com"},
+    {name = "lhoestq", email = "quentin@huggingface.co"},
+    {name = "wengh", email = "wenghy02@gmail.com"},
+]
+license = {text = "Apache License 2.0"}
 readme = "README.md"
-packages = [
-    { include = "pyspark_huggingface" },
+requires-python = ">=3.9"
+dependencies = [
+    "datasets>=3.2",
+    "huggingface-hub>=0.27.1",
 ]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-datasets = "^3.2"
-huggingface_hub = "^0.27.1"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.0.0"
-pytest-dotenv = "^0.5.2"
-pytest-mock = "^3.14.0"
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+    "pyarrow-stubs>=19.4",
+    "pyspark>=4.0.0",
+    "pytest>=8.0.0",
+    "pytest-dotenv>=0.5.2",
+    "pytest-mock>=3.14.0",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.7.3,<0.8"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
