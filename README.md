@@ -16,6 +16,7 @@ A Spark Data Source for accessing [🤗 Hugging Face Datasets](https://huggingfa
 - Stream datasets from Hugging Face as Spark DataFrames
 - Select subsets and splits, apply projection and predicate filters
 - Save Spark DataFrames as Parquet files to Hugging Face
+- Fast deduped uploads
 - Fully distributed
 - Authentication via `huggingface-cli login` or tokens
 - Compatible with Spark 4 (with auto-import)
@@ -77,6 +78,17 @@ df = (
     .load("HuggingFaceFW/fineweb-edu")
 )
 ```
+
+## Fast deduped uploads
+
+Hugging Face uses Xet: a dedupe-based storage which enables fast deduped uploads.
+
+Unlike traditional remote storage, uploads are faster on Xet because duplicate data is only uploaded once.
+For example: if some or all of the data already exists in other files on Xet, it is not uploaded again, saving bandwidth and speeding up uploads. Deduplication for Parquet is enabled through Content Defined Chunking (CDC).
+
+Thanks to Parquet CDC and Xet deduplication, saving a dataset on Hugging Face is faster than on any traditional remote storage.
+
+For more information, see [https://huggingface.co/blog/parquet-cdc](https://huggingface.co/blog/parquet-cdc).
 
 ## Backport
 
