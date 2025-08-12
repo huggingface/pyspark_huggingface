@@ -1,9 +1,9 @@
 from typing import TYPE_CHECKING, Optional
 
-from pyspark.sql.datasource import DataSource
+from pyspark_huggingface.compat.datasource import DataSource
 
 if TYPE_CHECKING:
-    from pyspark.sql.datasource import DataSourceWriter, DataSourceReader
+    from pyspark_huggingface.compat.datasource import DataSourceWriter, DataSourceReader
     from pyspark.sql.types import StructType
 
     from pyspark_huggingface.huggingface_sink import HuggingFaceSink

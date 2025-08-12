@@ -2,9 +2,10 @@ import ast
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from pyspark.sql.datasource import DataSource, DataSourceReader, InputPartition
 from pyspark.sql.pandas.types import from_arrow_schema
 from pyspark.sql.types import StructType
+from pyspark_huggingface.compat.datasource import DataSource, DataSourceReader, InputPartition
+
 
 if TYPE_CHECKING:
     from datasets import DatasetBuilder, IterableDataset
@@ -33,7 +34,7 @@ class HuggingFaceSource(DataSource):
 
     Load a public dataset from the HuggingFace Hub.
 
-    >>> df = spark.read.format("huggingface").load("imdb")
+    >>> df = spark.read.format("huggingface").load("stanfordnlp/imdb")
     DataFrame[text: string, label: bigint]
 
     >>> df.show()
@@ -47,7 +48,7 @@ class HuggingFaceSource(DataSource):
 
     Load a specific split from a public dataset from the HuggingFace Hub.
 
-    >>> spark.read.format("huggingface").option("split", "test").load("imdb").show()
+    >>> spark.read.format("huggingface").option("split", "test").load("stanfordnlp/imdb").show()
     +--------------------+-----+
     |                text|label|
     +--------------------+-----+
@@ -80,12 +81,17 @@ class HuggingFaceSource(DataSource):
 
         if "path" not in options or not options["path"]:
             raise Exception("You must specify a dataset name.")
+        
+        from huggingface_hub import get_token
 
         kwargs = dict(self.options)
         self.dataset_name = kwargs.pop("path")
         self.config_name = kwargs.pop("config", None)
         self.split = kwargs.pop("split", self.DEFAULT_SPLIT)
+        self.revision = kwargs.pop("revision", None)
         self.streaming = kwargs.pop("streaming", "true").lower() == "true"
+        self.token = kwargs.pop("token", None) or get_token()
+        self.endpoint = kwargs.pop("endpoint", None)
         for arg in kwargs:
             if kwargs[arg].lower() == "true":
                 kwargs[arg] = True
@@ -96,8 +102,12 @@ class HuggingFaceSource(DataSource):
                     kwargs[arg] = ast.literal_eval(kwargs[arg])
                 except ValueError:
                     pass
+                    
+        # Raise the right error if the dataset doesn't exist
+        api = self._get_api()
+        api.repo_info(self.dataset_name, repo_type="dataset", revision=self.revision)
 
-        self.builder = load_dataset_builder(self.dataset_name, self.config_name, **kwargs)
+        self.builder = load_dataset_builder(self.dataset_name, self.config_name, token=self.token, revision=self.revision, **kwargs)
         streaming_dataset = self.builder.as_streaming_dataset()
         if self.split not in streaming_dataset:
             raise Exception(f"Split {self.split} is invalid. Valid options are {list(streaming_dataset)}")
@@ -106,6 +116,11 @@ class HuggingFaceSource(DataSource):
         if not self.streaming_dataset.features:
             self.streaming_dataset = self.streaming_dataset._resolve_features()
 
+    def _get_api(self):
+        from huggingface_hub import HfApi
+
+        return HfApi(token=self.token, endpoint=self.endpoint, library_name="pyspark_huggingface")
+
     @classmethod
     def name(cls):
         return "huggingfacesource"
@@ -113,7 +128,7 @@ class HuggingFaceSource(DataSource):
     def schema(self):
         return from_arrow_schema(self.streaming_dataset.features.arrow_schema)
 
-    def reader(self, schema: StructType) -> "DataSourceReader":
+    def reader(self, schema: StructType) -> "HuggingFaceDatasetsReader":
         return HuggingFaceDatasetsReader(
             schema,
             builder=self.builder,
@@ -137,7 +152,7 @@ class HuggingFaceDatasetsReader(DataSourceReader):
         self.streaming_dataset = streaming_dataset
         # Get and validate the split name
 
-    def partitions(self) -> Sequence[InputPartition]:
+    def partitions(self) -> Sequence[Shard]:
         if self.streaming_dataset:
             return [Shard(index=i) for i in range(self.streaming_dataset.num_shards)]
         else:

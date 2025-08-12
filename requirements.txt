@@ -1,3 +1,0 @@
-datasets==3.1.0
-pyspark[connect]==4.0.0.dev2
-pytest

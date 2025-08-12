@@ -3,12 +3,12 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, List, Optional, Union
 
-from pyspark.sql.datasource import (
+from pyspark.sql.types import StructType
+from pyspark_huggingface.compat.datasource import (
     DataSource,
     DataSourceArrowWriter,
     WriterCommitMessage,
 )
-from pyspark.sql.types import StructType
 
 if TYPE_CHECKING:
     from huggingface_hub import (
@@ -66,12 +66,14 @@ class HuggingFaceSink(DataSource):
         if "path" not in options or not options["path"]:
             raise Exception("You must specify a dataset name.")
 
+        from huggingface_hub import get_token
+
         kwargs = dict(self.options)
-        self.token = kwargs.pop("token")
         self.repo_id = kwargs.pop("path")
         self.path_in_repo = kwargs.pop("path_in_repo", None)
         self.split = kwargs.pop("split", None)
         self.revision = kwargs.pop("revision", None)
+        self.token = kwargs.pop("token", None) or get_token()
         self.endpoint = kwargs.pop("endpoint", None)
         for arg in kwargs:
             if kwargs[arg].lower() == "true":
@@ -89,7 +91,7 @@ class HuggingFaceSink(DataSource):
     def name(cls):
         return "huggingfacesink"
 
-    def writer(self, schema: StructType, overwrite: bool) -> DataSourceArrowWriter:
+    def writer(self, schema: StructType, overwrite: bool) -> "HuggingFaceDatasetsWriter":
         return HuggingFaceDatasetsWriter(
             repo_id=self.repo_id,
             path_in_repo=self.path_in_repo,
@@ -150,7 +152,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
     def _get_api(self):
         from huggingface_hub import HfApi
 
-        return HfApi(token=self.token, endpoint=self.endpoint)
+        return HfApi(token=self.token, endpoint=self.endpoint, library_name="pyspark_huggingface")
 
     @property
     def prefix(self) -> str:
