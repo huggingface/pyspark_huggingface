@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 class HuggingFaceSink(DataSource):
     """
     A DataSource for writing Spark DataFrames to HuggingFace Datasets.
@@ -125,8 +126,9 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         token: str,
         endpoint: Optional[str] = None,
         row_group_size: Optional[int] = None,
-        max_bytes_per_file=500_000_000,
-        max_operations_per_commit=100,
+        max_bytes_per_file: int = 500_000_000,
+        max_operations_per_commit: int = 100,
+        use_content_defined_chunking: bool = True,
         **kwargs,
     ):
         import uuid
@@ -144,6 +146,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         self.row_group_size = row_group_size
         self.max_bytes_per_file = max_bytes_per_file
         self.max_operations_per_commit = max_operations_per_commit
+        self.use_content_defined_chunking = use_content_defined_chunking
         self.kwargs = kwargs
 
         # Use a unique filename prefix to avoid conflicts with existing files
@@ -232,7 +235,14 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             Limiting the size is necessary because we are writing them in memory.
             """
             while True:
-                with pq.ParquetWriter(parquet, schema, **self.kwargs) as writer:
+                with pq.ParquetWriter(
+                    parquet,
+                    schema=schema,
+                    **{
+                        "use_content_defined_chunking": self.use_content_defined_chunking,
+                        **self.kwargs
+                    }
+                ) as writer:
                     num_batches = 0
                     for batch in iterator:  # Start iterating from where we left off
                         writer.write_batch(batch, row_group_size=self.row_group_size)
