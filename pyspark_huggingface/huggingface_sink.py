@@ -213,10 +213,9 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
                     f"{self.prefix}-{self.uuid}-part-{partition_id}-{num_files}.parquet"
                 )
                 num_files += 1
-                parquet.seek(0)
 
                 addition = CommitOperationAdd(
-                    path_in_repo=name, path_or_fileobj=parquet
+                    path_in_repo=name, path_or_fileobj=parquet.getvalue()
                 )
                 api.preupload_lfs_files(
                     repo_id=self.repo_id,
