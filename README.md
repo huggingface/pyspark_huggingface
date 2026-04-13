@@ -64,6 +64,8 @@ df.write.format("huggingface").mode("overwrite").save("buckets/username/bucket_n
 df.write.format("huggingface").option("token", "hf_xxx").mode("overwrite").save("buckets/username/bucket_name/my_data_directory")
 ```
 
+Buckets support requires `datasets>=4.8.4` and `huggingface_hub>=1.10.1`.
+
 ## Advanced
 
 Select a split:
