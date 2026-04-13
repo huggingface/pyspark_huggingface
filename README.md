@@ -11,7 +11,7 @@
 
 # Spark Data Source for Hugging Face Datasets
 
-A Spark Data Source for accessing [🤗 Hugging Face Datasets](https://huggingface.co/datasets):
+A Spark Data Source for accessing [🤗 Hugging Face Datasets](https://huggingface.co/datasets) and [🤗 Storage Bucket](https://huggingface.co/storage):
 
 - Stream datasets from Hugging Face as Spark DataFrames
 - Select subsets and splits, apply projection and predicate filters
@@ -28,7 +28,7 @@ A Spark Data Source for accessing [🤗 Hugging Face Datasets](https://huggingfa
 pip install pyspark_huggingface
 ```
 
-## Usage
+## Usage with dataset repositories
 
 Load a dataset (here [stanfordnlp/imdb](https://huggingface.co/datasets/stanfordnlp/imdb)):
 
@@ -41,9 +41,27 @@ Save to Hugging Face:
 
 ```python
 # Login with huggingface-cli login
-df.write.format("huggingface").save("username/my_dataset")
+df.write.format("huggingface").mode("overwrite").save("username/my_dataset")
 # Or pass a token manually
-df.write.format("huggingface").option("token", "hf_xxx").save("username/my_dataset")
+df.write.format("huggingface").option("token", "hf_xxx").mode("overwrite").save("username/my_dataset")
+```
+
+## Usage with storage buckets
+
+Load a data from a [Storage Bucket](https://huggingface.co/storage):
+
+```python
+import pyspark_huggingface
+df = spark.read.format("huggingface").load("buckets/username/bucket_name/my_data_directory")
+```
+
+Save to Hugging Face:
+
+```python
+# Login with huggingface-cli login
+df.write.format("huggingface").mode("overwrite").save("buckets/username/bucket_name/my_data_directory")
+# Or pass a token manually
+df.write.format("huggingface").option("token", "hf_xxx").mode("overwrite").save("buckets/username/bucket_name/my_data_directory")
 ```
 
 ## Advanced
@@ -61,9 +79,34 @@ test_df = (
 Select a subset/config:
 
 ```python
-test_df = (
+sample_df = (
     spark.read.format("huggingface")
     .option("config", "sample-10BT")
+    .load("HuggingFaceFW/fineweb-edu")
+)
+```
+
+Specify data_files or data_dir:
+
+```python
+one_file_df = (
+    spark.read.format("huggingface")
+    .option("data_files", "sample/10BT/000_00000.parquet")
+    .load("HuggingFaceFW/fineweb-edu")
+)
+two_files_df = (
+    spark.read.format("huggingface")
+    .option("data_files", "['sample/10BT/000_00000.parquet', 'sample/10BT/001_00000.parquet']")
+    .load("HuggingFaceFW/fineweb-edu")
+)
+glob_df = (
+    spark.read.format("huggingface")
+    .option("data_files", "sample/10BT/*.parquet")
+    .load("HuggingFaceFW/fineweb-edu")
+)
+dir_df = (
+    spark.read.format("huggingface")
+    .option("data_dir", "sample/10BT")
     .load("HuggingFaceFW/fineweb-edu")
 )
 ```
