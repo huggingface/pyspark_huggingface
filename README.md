@@ -52,16 +52,16 @@ Load a data from a [Storage Bucket](https://huggingface.co/storage):
 
 ```python
 import pyspark_huggingface
-df = spark.read.format("huggingface").load("buckets/username/bucket_name/my_data_directory")
+df = spark.read.format("huggingface").option("data_dir", "data").load("buckets/username/bucket_name")
 ```
 
 Save to Hugging Face:
 
 ```python
 # Login with huggingface-cli login
-df.write.format("huggingface").mode("overwrite").save("buckets/username/bucket_name/my_data_directory")
+df.write.format("huggingface").option("data_dir", "data").mode("overwrite").save("buckets/username/bucket_name")
 # Or pass a token manually
-df.write.format("huggingface").option("token", "hf_xxx").mode("overwrite").save("buckets/username/bucket_name/my_data_directory")
+df.write.format("huggingface").option("data_dir", "data").option("token", "hf_xxx").mode("overwrite").save("buckets/username/bucket_name")
 ```
 
 Buckets support requires `datasets>=4.8.4` and `huggingface_hub>=1.10.1`.
@@ -96,9 +96,9 @@ one_file_df = (
     .option("data_files", "sample/10BT/000_00000.parquet")
     .load("HuggingFaceFW/fineweb-edu")
 )
-two_files_df = (
+multiple_files_df = (
     spark.read.format("huggingface")
-    .option("data_files", "['sample/10BT/000_00000.parquet', 'sample/10BT/001_00000.parquet']")
+    .option("data_files", '["sample/10BT/000_00000.parquet", "sample/10BT/001_00000.parquet"]')
     .load("HuggingFaceFW/fineweb-edu")
 )
 glob_df = (
@@ -116,7 +116,7 @@ dir_df = (
 Filters columns and rows (especially efficient for Parquet datasets):
 
 ```python
-df = (
+filtered_df = (
     spark.read.format("huggingface")
     .option("filters", '[("language_score", ">", 0.99)]')
     .option("columns", '["text", "language_score"]')
