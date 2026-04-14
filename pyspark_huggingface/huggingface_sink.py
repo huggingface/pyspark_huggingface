@@ -1,6 +1,8 @@
 import ast
+import json
 import logging
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import TYPE_CHECKING, Iterator, List, Optional, Union
 
 from pyspark.sql.types import StructType
@@ -12,6 +14,7 @@ from pyspark_huggingface.compat.datasource import (
 
 if TYPE_CHECKING:
     from huggingface_hub import (
+        BucketFile,
         CommitOperation,
         CommitOperationAdd,
         HfApi,
@@ -20,6 +23,9 @@ if TYPE_CHECKING:
     from pyarrow import RecordBatch
 
 logger = logging.getLogger(__name__)
+
+# Same default as `pyarrow` and `datasets`
+DEFAULT_CDC_OPTIONS = {"min_chunk_size": 256 * 1024, "max_chunk_size": 1024 * 1024, "norm_level": 0}
 
 
 class HuggingFaceSink(DataSource):
@@ -32,8 +38,8 @@ class HuggingFaceSink(DataSource):
 
     Data Source Options:
     - token (str, required): HuggingFace API token for authentication.
-    - path (str, required): HuggingFace repository ID, e.g. `{username}/{dataset}`.
-    - path_in_repo (str): Path within the repository to write the data. Defaults to "data".
+    - path (str, required): HuggingFace repository ID, e.g. `{username}/{dataset}` or bucket `{namespace}/{bucket}`.
+    - data_dir (str): Path within the repository to write the data. Defaults to "data".
     - split (str): Split name to write the data to. Defaults to `train`.
     - revision (str): Branch, tag, or commit to write to. Defaults to the main branch.
     - endpoint (str): Custom HuggingFace API endpoint URL.
@@ -70,10 +76,6 @@ class HuggingFaceSink(DataSource):
         from huggingface_hub import get_token
 
         kwargs = dict(self.options)
-        self.repo_id = kwargs.pop("path")
-        self.path_in_repo = kwargs.pop("path_in_repo", None)
-        self.split = kwargs.pop("split", None)
-        self.revision = kwargs.pop("revision", None)
         self.token = kwargs.pop("token", None) or get_token()
         self.endpoint = kwargs.pop("endpoint", None)
         for arg in kwargs:
@@ -93,17 +95,254 @@ class HuggingFaceSink(DataSource):
         return "huggingfacesink"
 
     def writer(self, schema: StructType, overwrite: bool) -> "HuggingFaceDatasetsWriter":
-        return HuggingFaceDatasetsWriter(
-            repo_id=self.repo_id,
-            path_in_repo=self.path_in_repo,
-            split=self.split,
-            revision=self.revision,
-            schema=schema,
-            overwrite=overwrite,
-            token=self.token,
-            endpoint=self.endpoint,
-            **self.kwargs,
+        kwargs = dict(self.kwargs)
+        if self.kwargs["path"].startswith("buckets/"):
+            _, namespace, bucket_name, *path_segments = kwargs.pop("path").split("/")
+            bucket_id = namespace + "/" + bucket_name
+            path = "/".join(path_segments)
+            data_dir = kwargs.pop("data_dir", None)
+            split = kwargs.pop("split", None)
+            return HuggingFaceBucketsWriter(
+                bucket_id=bucket_id,
+                path=path,
+                data_dir=data_dir,
+                split=split,
+                schema=schema,
+                overwrite=overwrite,
+                token=self.token,
+                endpoint=self.endpoint,
+                **kwargs,
+            )
+        else:
+            repo_id = kwargs.pop("path")
+            data_dir = kwargs.pop("data_dir", None)
+            split = kwargs.pop("split", None)
+            revision = kwargs.pop("revision", None)
+            return HuggingFaceDatasetsWriter(
+                repo_id=repo_id,
+                data_dir=data_dir,
+                split=split,
+                revision=revision,
+                schema=schema,
+                overwrite=overwrite,
+                token=self.token,
+                endpoint=self.endpoint,
+                **kwargs,
+            )
+
+
+@dataclass
+class HuggingFaceBucketAdditionsMessage(WriterCommitMessage):
+    additions: List["BucketFile"]
+
+
+class HuggingFaceBucketsWriter(DataSourceArrowWriter):
+
+    def __init__(
+        self,
+        *,
+        bucket_id: str,
+        path: Optional[str] = None,
+        data_dir: Optional[str] = None,
+        split: Optional[str] = None,
+        schema: StructType,
+        overwrite: bool,
+        token: str,
+        endpoint: Optional[str] = None,
+        row_group_size: Optional[int] = None,
+        max_bytes_per_file: int = 500_000_000,
+        max_operations_per_commit: int = 100,
+        use_content_defined_chunking: Union[bool, dict] = True,
+        write_page_index: bool = True,
+        **kwargs,
+    ):
+        import uuid
+
+        self.bucket_id = bucket_id
+        self.path = path
+        self.data_dir = (
+            data_dir.strip("/") if data_dir is not None else "data"
         )
+        self.split = split or "train"
+        self.schema = schema
+        self.overwrite = overwrite
+        self.token = token
+        self.endpoint = endpoint
+        self.row_group_size = row_group_size
+        self.max_bytes_per_file = max_bytes_per_file
+        self.max_operations_per_commit = max_operations_per_commit
+        self.use_content_defined_chunking = DEFAULT_CDC_OPTIONS if use_content_defined_chunking is True else use_content_defined_chunking
+        self.write_page_index = write_page_index
+        self.kwargs = kwargs
+
+        # Use a unique filename prefix to avoid conflicts with existing files
+        self.uuid = uuid.uuid4()
+
+    def _get_api(self):
+        from huggingface_hub import HfApi
+
+        return HfApi(token=self.token, endpoint=self.endpoint, library_name="pyspark_huggingface")
+
+    @property
+    def prefix(self) -> str:
+        return f"{self.path + '/' if self.path else ''}{self.data_dir}/{self.split}".strip("/")
+
+    def _list_split(self, api: "HfApi") -> Iterator[Union["RepoFile", "RepoFolder"]]:
+        """
+        Get all existing files of the current split.
+        """
+        from huggingface_hub import BucketFile
+
+        objects = api.list_bucket_tree(
+            bucket_id=self.bucket_id,
+            prefix=self.path,
+            recursive=False,
+        )
+        for obj in objects:
+            if isinstance(obj, BucketFile) and obj.path.startswith(self.prefix):
+                yield obj
+
+    def write(self, iterator: Iterator["RecordBatch"]) -> HuggingFaceBucketAdditionsMessage:
+        import io
+
+        from huggingface_hub import BucketFile
+        from pyarrow import parquet as pq
+        from pyspark import TaskContext
+        from pyspark.sql.pandas.types import to_arrow_schema
+
+        # Get the current partition ID. Use this to generate unique filenames for each partition.
+        context = TaskContext.get()
+        partition_id = context.partitionId() if context else 0
+
+        api = self._get_api()
+
+        schema = to_arrow_schema(self.schema)
+        if self.use_content_defined_chunking is not False:
+            schema = schema.with_metadata(
+                {**(schema.metadata or {}), "content_defined_chunking": json.dumps(self.use_content_defined_chunking)}
+            )
+
+        num_files = 0
+
+        # TODO: Evaluate the performance of using a temp file instead of an in-memory buffer.
+        with io.BytesIO() as parquet:
+
+            def flush(writer: pq.ParquetWriter):
+                """
+                Upload the current Parquet file and reset the buffer.
+                """
+                writer.close()  # Close the writer to flush the buffer
+                nonlocal num_files
+                name = (
+                    f".tmp/job-{self.uuid}/part-{partition_id:05d}/{self.prefix}-{num_files:05d}.parquet"
+                )
+                num_files += 1
+
+                api.batch_bucket_files(
+                    bucket_id=self.bucket_id,
+                    add=[(parquet.getvalue(), name)]
+                )
+
+                # Reuse the buffer for the next file
+                parquet.seek(0)
+                parquet.truncate()
+
+            """
+            Write the Parquet files, flushing the buffer when the file size exceeds the limit.
+            Limiting the size is necessary because we are writing them in memory.
+            """
+            while True:
+                with pq.ParquetWriter(
+                    parquet,
+                    schema=schema,
+                    **{
+                        "use_content_defined_chunking": self.use_content_defined_chunking,
+                        "write_page_index": self.write_page_index,
+                        **self.kwargs
+                    }
+                ) as writer:
+                    num_batches = 0
+                    for batch in iterator:  # Start iterating from where we left off
+                        writer.write_batch(batch, row_group_size=self.row_group_size)
+                        num_batches += 1
+                        if parquet.tell() > self.max_bytes_per_file:
+                            flush(writer)
+                            break  # Start a new file
+                    else:  # Finished writing all batches
+                        if num_batches > 0:
+                            flush(writer)
+                        break  # Exit while loop
+        
+        additions = [
+            obj
+            for obj in api.list_bucket_tree(
+                self.bucket_id,
+                prefix=f".tmp/job-{self.uuid}/part-{partition_id:05d}"
+            )
+            if isinstance(obj, BucketFile)
+        ]
+        additions.sort(key=attrgetter("path"))
+
+        return HuggingFaceBucketAdditionsMessage(additions=additions)
+
+    def commit(self, messages: List[HuggingFaceBucketAdditionsMessage]) -> None:  # type: ignore[override]
+        """
+        Commit the pre-uploaded Parquet files to the HuggingFace Hub, renaming them to match the expected format:
+        `{split}-{current:05d}-of-{total:05d}.parquet`.
+        Also delete or rename existing files of the split, depending on the mode.
+        """
+
+        api = self._get_api()
+
+        additions = [addition for message in messages for addition in message.additions]
+        copy = []
+        old_files_to_delete = []
+        tmp_files_to_delete = []
+        count_new = len(additions)
+        count_existing = 0
+
+        def format_path(i):
+            return f"{self.prefix}-{i:05d}-of-{count_new + count_existing:05d}.parquet"
+
+        # In overwrite mode, delete existing files
+        if self.overwrite:
+            old_files_to_delete = [obj.path for obj in self._list_split(api)]
+        # In append mode, rename existing files to have the correct total number of parts
+        else:
+            existing = list(self._list_split(api))
+            count_existing = len(existing)
+            for i, obj in enumerate(existing):
+                new_path = format_path(i)
+                copy.append(("bucket", self.bucket_id, obj.xet_hash, new_path))
+                old_files_to_delete.append(obj.path)
+
+        # Rename additions, putting them after existing files if any
+        _old_files_to_delete_set = {path: None for path in old_files_to_delete}  # dict to keep ordering
+        for i, obj in enumerate(additions):
+            new_path= format_path(i + count_existing)
+            # Overwrite the deletion operation if the file already exists
+            copy.append(("bucket", self.bucket_id, obj.xet_hash, new_path))
+            tmp_files_to_delete.append(obj.path)
+            _old_files_to_delete_set.pop(new_path, None)
+        old_files_to_delete = list(_old_files_to_delete_set)
+
+        # Commit the new files
+        api.batch_bucket_files(
+            bucket_id=self.bucket_id,
+            copy=copy,
+        )
+        api.batch_bucket_files(
+            bucket_id=self.bucket_id,
+            delete=old_files_to_delete + tmp_files_to_delete
+        )
+
+    def abort(self, messages: List[HuggingFaceBucketAdditionsMessage]) -> None:  # type: ignore[override]
+        """Delete the temporary files"""
+        api = self._get_api()
+        additions = [addition.path for message in messages for addition in message.additions]
+        api.batch_bucket_files(self.bucket_id, delete=additions)
+        for addition in additions:
+            logger.info(f"Aborted {addition}")
 
 
 @dataclass
@@ -118,7 +357,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         self,
         *,
         repo_id: str,
-        path_in_repo: Optional[str] = None,
+        data_dir: Optional[str] = None,
         split: Optional[str] = None,
         revision: Optional[str] = None,
         schema: StructType,
@@ -128,14 +367,15 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         row_group_size: Optional[int] = None,
         max_bytes_per_file: int = 500_000_000,
         max_operations_per_commit: int = 100,
-        use_content_defined_chunking: bool = True,
+        use_content_defined_chunking: Union[bool, dict] = True,
+        write_page_index: bool = True,
         **kwargs,
     ):
         import uuid
 
         self.repo_id = repo_id
-        self.path_in_repo = (
-            path_in_repo.strip("/") if path_in_repo is not None else "data"
+        self.data_dir = (
+            data_dir.strip("/") if data_dir is not None else "data"
         )
         self.split = split or "train"
         self.revision = revision
@@ -146,7 +386,8 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         self.row_group_size = row_group_size
         self.max_bytes_per_file = max_bytes_per_file
         self.max_operations_per_commit = max_operations_per_commit
-        self.use_content_defined_chunking = use_content_defined_chunking
+        self.use_content_defined_chunking = DEFAULT_CDC_OPTIONS if use_content_defined_chunking is True else use_content_defined_chunking
+        self.write_page_index = write_page_index
         self.kwargs = kwargs
 
         # Use a unique filename prefix to avoid conflicts with existing files
@@ -159,7 +400,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
     @property
     def prefix(self) -> str:
-        return f"{self.path_in_repo}/{self.split}".strip("/")
+        return f"{self.data_dir}/{self.split}".strip("/")
 
     def _list_split(self, api: "HfApi") -> Iterator[Union["RepoFile", "RepoFolder"]]:
         """
@@ -169,7 +410,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
         try:
             objects = api.list_repo_tree(
-                path_in_repo=self.path_in_repo,
+                data_dir=self.data_dir,
                 repo_id=self.repo_id,
                 repo_type=self.repo_type,
                 revision=self.revision,
@@ -197,6 +438,10 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
         api = self._get_api()
 
         schema = to_arrow_schema(self.schema)
+        if self.use_content_defined_chunking is not False:
+            schema = schema.with_metadata(
+                {**(schema.metadata or {}), "content_defined_chunking": json.dumps(self.use_content_defined_chunking)}
+            )
         num_files = 0
         additions = []
 
@@ -239,6 +484,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
                     schema=schema,
                     **{
                         "use_content_defined_chunking": self.use_content_defined_chunking,
+                        "write_page_index": self.write_page_index,
                         **self.kwargs
                     }
                 ) as writer:
@@ -313,7 +559,7 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
             # Overwrite the deletion operation if the file already exists
             operations[addition.path_in_repo] = addition
 
-        # Upload the new files
+        # Commit the new files
         self._create_commits(
             api,
             operations=list(operations.values()),
@@ -347,6 +593,6 @@ class HuggingFaceDatasetsWriter(DataSourceArrowWriter):
 
     def abort(self, messages: List[HuggingFaceCommitMessage]) -> None:  # type: ignore[override]
         # We don't need to do anything here, as the files are not included in the repo until commit
-        additions = [addition for message in messages for addition in message.additions]
+        additions = [addition.path_in_repo for message in messages for addition in message.additions]
         for addition in additions:
             logger.info(f"Aborted {addition}")

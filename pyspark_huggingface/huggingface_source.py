@@ -100,12 +100,17 @@ class HuggingFaceSource(DataSource):
             else:
                 try:
                     kwargs[arg] = ast.literal_eval(kwargs[arg])
-                except ValueError:
+                except (ValueError, SyntaxError):
                     pass
                     
         # Raise the right error if the dataset doesn't exist
         api = self._get_api()
-        api.repo_info(self.dataset_name, repo_type="dataset", revision=self.revision)
+        if self.dataset_name.startswith("buckets/"):
+            _, namespace, bucket_name, *_ = self.dataset_name.split("/")
+            bucket_id = namespace + "/" + bucket_name
+            api.bucket_info(bucket_id)
+        else:
+            api.repo_info(self.dataset_name, repo_type="dataset", revision=self.revision)
 
         self.builder = load_dataset_builder(self.dataset_name, self.config_name, token=self.token, revision=self.revision, **kwargs)
         streaming_dataset = self.builder.as_streaming_dataset()
