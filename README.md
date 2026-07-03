@@ -22,6 +22,13 @@ A Spark Data Source for accessing [🤗 Hugging Face Datasets](https://huggingfa
 - Compatible with Spark 4 (with auto-import)
 - Backport for Spark 3.5, 3.4 and 3.3
 
+Supported input formats:
+- Parquet, Arrow, Lance
+- JSON Lines, JSON, CSV, text
+- WebDataset
+- Media folders (images, audio, videos, pdf, nifti etc.)
+- and more (full list [here](https://huggingface.co/docs/datasets/package_reference/loading_methods))
+
 ## Installation
 
 ```
